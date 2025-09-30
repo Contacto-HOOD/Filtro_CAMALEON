@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Filtro educativo EVC (parálisis facial simulada)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #0b0e14; color: #e5e7eb; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    .app { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+    header, footer { padding: 12px 16px; background: #111827; }
+    header { display:flex; align-items:center; gap: 12px; }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+    main { position: relative; overflow: hidden; }
+    #canvas { width: 100vw; height: calc(100vh - 120px); display:block; background:#000; }
+    .controls { display:flex; flex-wrap:wrap; align-items:center; gap: 12px; }
+    .controls label { font-size: 12px; opacity:.9 }
+    .pill { background:#1f2937; border:1px solid #374151; padding:8px 10px; border-radius:999px; display:flex; align-items:center; gap:8px; }
+    .cta { margin-left:auto; display:flex; gap:8px; }
+    .btn { background:#2563eb; border:none; color:white; padding:8px 12px; border-radius:10px; font-weight:600; cursor:pointer; }
+    .btn.secondary { background:#374151; }
+    .badge { font-size:11px; opacity:.8 }
+    .overlay-text { position:absolute; left:24px; bottom:24px; line-height:1.25; }
+    .overlay-text h2 { margin:0 0 6px; font-size:24px; font-weight:800; letter-spacing:.2px; }
+    .overlay-text .fast { font-size:14px; opacity:.92; }
+    .mirror { transform: scaleX(-1); }
+  </style>
+  <!-- MediaPipe Face Landmarker Tasks (web) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm/vision_bundle.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0"></script>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Filtro educativo EVC · simulación de parálisis facial</h1>
+      <div class="controls cta">
+        <div class="pill"><label>Intensidad</label><input id="intensity" type="range" min="0" max="100" value="65" /></div>
+        <div class="pill"><label>Lado afectado</label>
+          <select id="side">
+            <option value="left">Izquierdo</option>
+            <option value="right">Derecho</option>
+          </select>
+        </div>
+        <button class="btn secondary" id="mirrorBtn">Espejo: ON</button>
+        <button class="btn" id="fs">Pantalla completa</button>
+      </div>
+    </header>
+    <main>
+      <video id="video" autoplay playsinline muted style="display:none"></video>
+      <canvas id="canvas"></canvas>
+      <div class="overlay-text" id="edu">
+        <h2>¿Cara caída? ¡Actúa rápido!</h2>
+        <div class="fast">F.A.S.T.: <strong>F</strong>ace (asimetría), <strong>A</strong>rm (debilidad), <strong>S</strong>peech (habla), <strong>T</strong>ime (llama a emergencias).</div>
+      </div>
+    </main>
+    <footer>
+      <div class="badge">Uso educativo / concientización. No diagnóstico.</div>
+    </footer>
+  </div>
+
+<script>
+(async () => {
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const intensityEl = document.getElementById('intensity');
+  const sideEl = document.getElementById('side');
+  const fsBtn = document.getElementById('fs');
+  const mirrorBtn = document.getElementById('mirrorBtn');
+
+  let mirror = true;
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight - 120; // header+footer approx
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Camera
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+  } catch (e) {
+    alert('No se pudo acceder a la cámara: ' + e.message);
+    return;
+  }
+
+  // MediaPipe Face Landmarker
+  const vision = await FilesetResolver.forVisionTasks(
+    // NOTE: if offline, host this WASM locally
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm'
+  );
+  const landmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm/face_landmarker.task'
+    },
+    numFaces: 1,
+    runningMode: 'VIDEO',
+    outputFaceBlendshapes: false,
+    outputFacialTransformationMatrixes: false
+  });
+
+  const LEFT_IDX = new Set([
+    // face mesh indices roughly for left half (from subject's POV).
+    // Minimal mask using contour around left side of face + lips + eye.
+    234, 93, 132, 58, 172, 136, 150, 176, 149, 176, 148, 152, 377, 400, 378, 379, 365, 397, 365,
+    50, 101, 205, 206, 203, 36, 142, 214, 135, 169, 170, 171, 140, 32, 208, 111, 117
+  ]);
+  const RIGHT_IDX = new Set([
+    454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 176, 150, 136, 172, 58,
+    127, 234, 93, 132, 58, 172, 136, 150, 176, 149, 176, 148
+  ]);
+
+  const landmarkToCanvas = (x, y) => {
+    // video drawn to canvas with letterboxing: compute scale
+    const vw = video.videoWidth; const vh = video.videoHeight;
+    const cw = canvas.width; const ch = canvas.height;
+    const scale = Math.min(cw / vw, ch / vh);
+    const dx = (cw - vw * scale) / 2; const dy = (ch - vh * scale) / 2;
+    return [dx + x * vw * scale, dy + y * vh * scale, scale];
+  };
+
+  function drawFrame() {
+    // Clear
+    ctx.clearRect(0,0,canvas.width, canvas.height);
+
+    // Draw video background (mirrored for booth UX)
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const cw = canvas.width, ch = canvas.height;
+    const scale = Math.min(cw / vw, ch / vh);
+    const dx = (cw - vw * scale) / 2, dy = (ch - vh * scale) / 2;
+
+    ctx.save();
+    if (mirror) {
+      ctx.translate(cw, 0); ctx.scale(-1, 1);
+      ctx.drawImage(video, dx, dy, vw * scale, vh * scale);
+    } else {
+      ctx.drawImage(video, dx, dy, vw * scale, vh * scale);
+    }
+    ctx.restore();
+  }
+
+  function maskPolygon(ctx, points) {
+    ctx.beginPath();
+    for (let i = 0; i < points.length; i++) {
+      const [x, y] = points[i];
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.clip();
+  }
+
+  let lastVideoTime = -1;
+  async function loop() {
+    requestAnimationFrame(loop);
+    if (video.readyState < 2) return;
+    if (lastVideoTime === video.currentTime) return;
+    lastVideoTime = video.currentTime;
+
+    drawFrame();
+
+    const result = await landmarker.detectForVideo(video, performance.now());
+    const face = result.faceLandmarks?.[0];
+    if (!face) return;
+
+    const side = sideEl.value;
+    const intensity = parseFloat(intensityEl.value) / 100; // 0..1
+
+    // Build a mask for the chosen side of the face using a subset of landmarks
+    const idxSet = side === 'left' ? LEFT_IDX : RIGHT_IDX;
+    const maskPts = [];
+    for (let i = 0; i < face.length; i++) {
+      if (!idxSet.has(i)) continue;
+      const [x, y] = landmarkToCanvas(face[i].x, face[i].y);
+      maskPts.push([x, y]);
+    }
+    if (maskPts.length < 3) return;
+
+    // Compute droop offset based on key anchors (mouth corner + eye)
+    const mouthCornerIndex = side === 'left' ? 61 : 291; // 61=left mouth corner, 291=right
+    const eyeCenterIndex = side === 'left' ? 159 : 386;  // upper eyelid approx
+
+    const [mx, my] = landmarkToCanvas(face[mouthCornerIndex].x, face[mouthCornerIndex].y);
+    const [ex, ey] = landmarkToCanvas(face[eyeCenterIndex].x, face[eyeCenterIndex].y);
+
+    const droopY = 18 + intensity * 22;           // pixels downward shift
+    const eyeDroopY = 6 + intensity * 10;         // eyelid drop
+    const mouthSkewX = (side === 'left' ? -1 : 1) * (4 + intensity * 8); // skew towards side
+
+    // Duplicate the face side inside a clipping mask and offset to fake a local warp
+    ctx.save();
+    maskPolygon(ctx, maskPts);
+
+    // 1) Base re-draw of that region (already drawn by background)
+    // 2) Overdraw shifted copy to simulate droop
+    ctx.globalAlpha = 0.9;
+    const cw = canvas.width, ch = canvas.height;
+    ctx.save();
+    if (mirror) { ctx.translate(cw, 0); ctx.scale(-1, 1); }
+
+    // Draw shifted region (slight vertical translation + shear)
+    ctx.translate( (mouthSkewX/2) * (mirror? -1:1), droopY );
+    // local shear using transform matrix
+    const shear = (side === 'left' ? -0.05 : 0.05) * intensity;
+    ctx.transform(1, 0, shear, 1, 0, 0);
+
+    // Re-draw the video over the full rect; clip confines it to side mask
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const scale = Math.min(cw / vw, ch / vh);
+    const dx = (cw - vw * scale) / 2, dy = (ch - vh * scale) / 2;
+    ctx.drawImage(video, dx, dy, vw * scale, vh * scale);
+    ctx.restore();
+
+    // Soft edge feather
+    const grd = ctx.createLinearGradient(mx, my - 60, mx, my + 80);
+    grd.addColorStop(0, 'rgba(0,0,0,0)');
+    grd.addColorStop(1, 'rgba(0,0,0,0.12)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,cw,ch);
+
+    // Eye shadow to sell eyelid droop
+    ctx.globalAlpha = 0.28 + intensity * 0.15;
+    ctx.beginPath();
+    ctx.ellipse(ex, ey + eyeDroopY, 36 + intensity*10, 12 + intensity*6, 0, 0, Math.PI*2);
+    ctx.fillStyle = 'black';
+    ctx.fill();
+
+    ctx.restore(); // end mask
+
+    // Optional: draw subtle guideline of facial asymmetry (toggleable if needed)
+    // ctx.strokeStyle = 'rgba(255,255,255,.08)';
+    // ctx.beginPath(); ctx.moveTo(mx-120, my); ctx.lineTo(mx+120, my+droopY*0.4); ctx.stroke();
+  }
+
+  requestAnimationFrame(loop);
+
+  // UI handlers
+  fsBtn.addEventListener('click', () => {
+    const el = document.documentElement; if (!document.fullscreenElement) el.requestFullscreen(); else document.exitFullscreen();
+  });
+  mirrorBtn.addEventListener('click', () => {
+    mirror = !mirror; mirrorBtn.textContent = `Espejo: ${mirror ? 'ON' : 'OFF'}`;
+  });
+})();
+</script>
+</body>
+</html>
