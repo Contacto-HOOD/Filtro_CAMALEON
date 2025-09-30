@@ -37,6 +37,7 @@
     <header>
       <h1>Filtro educativo EVC · simulación de parálisis facial</h1>
       <div class="controls cta">
+        <button class="btn" id="startBtn" style="display:none">Iniciar cámara</button>
         <div class="pill"><label>Intensidad</label><input id="intensity" type="range" min="0" max="100" value="65" /></div>
         <div class="pill"><label>Lado afectado</label>
           <select id="side">
@@ -74,6 +75,7 @@
   const sideEl = document.getElementById('side');
   const fsBtn = document.getElementById('fs');
   const mirrorBtn = document.getElementById('mirrorBtn');
+  const startBtn = document.getElementById('startBtn');
 
   let mirror = true;
 
@@ -99,10 +101,17 @@
     });
   }
 
+  function isiOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+
   async function startStream(deviceId) {
     try {
       if (currentStream) currentStream.getTracks().forEach(t => t.stop());
-      const constraints = { video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false };
+      const mobile = isiOS();
+      const constraints = mobile
+        ? { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }
+        : { video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false };
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       currentStream = stream;
       video.srcObject = stream;
@@ -117,7 +126,19 @@
 
   try {
     // Primer intento sin deviceId para disparar el permiso
-    await startStream();
+    // En iOS requerimos gesto del usuario para autoplay del stream en algunos casos
+    if (isiOS()) {
+      startBtn.style.display = 'inline-flex';
+      startBtn.onclick = async () => {
+        await startStream();
+        await listCameras();
+        startBtn.style.display = 'none';
+      };
+    } else {
+      await startStream();
+      await listCameras();
+      startBtn.style.display = 'none';
+    }
     // Listar cámaras luego del permiso (Chrome revela labels tras permitir)
     await listCameras();
     cameraSelect.addEventListener('change', () => startStream(cameraSelect.value));
@@ -203,6 +224,14 @@
     errBox.textContent = 'Advertencia: esta página no está en HTTPS. La cámara solo funciona en contextos seguros (HTTPS).';
     errBox.style.display = 'block';
   }
+
+  // iOS tip visible si no llega video
+  setTimeout(() => {
+    if (!video.videoWidth) {
+      errBox.innerHTML = 'En iPhone: abre en Safari, toca <b>Iniciar cámara</b>, y ve a Ajustes > Safari > Cámara > Permitir. Si usas Chrome en iOS: Ajustes > Chrome > Cámara > Permitir.';
+      errBox.style.display = 'block';
+    }
+  }, 2000);
     if (video.readyState < 2) return;
     if (lastVideoTime === video.currentTime) return;
     lastVideoTime = video.currentTime;
