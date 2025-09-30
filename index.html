@@ -24,6 +24,10 @@
     .overlay-text .fast { font-size:14px; opacity:.92; }
     .mirror { transform: scaleX(-1); }
   </style>
+  <style>
+    .error { position:absolute; top:64px; left:16px; padding:10px 12px; background:#7f1d1d; color:#fecaca; border:1px solid #ef4444; border-radius:10px; display:none; max-width:min(640px, 90vw); }
+    .hidden { display:none; }
+  </style>
   <!-- MediaPipe Face Landmarker Tasks (web) -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm/vision_bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0"></script>
@@ -40,11 +44,15 @@
             <option value="right">Derecho</option>
           </select>
         </div>
+        <div class="pill"><label>Cámara</label>
+          <select id="cameraSelect"></select>
+        </div>
         <button class="btn secondary" id="mirrorBtn">Espejo: ON</button>
         <button class="btn" id="fs">Pantalla completa</button>
       </div>
     </header>
     <main>
+      <div class="error" id="errBox"></div>
       <video id="video" autoplay playsinline muted style="display:none"></video>
       <canvas id="canvas"></canvas>
       <div class="overlay-text" id="edu">
@@ -77,13 +85,48 @@
   resize();
 
   // Camera
+  const cameraSelect = document.getElementById('cameraSelect');
+  const errBox = document.getElementById('errBox');
+  let currentStream = null;
+
+  async function listCameras() {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === 'videoinput');
+    cameraSelect.innerHTML = '';
+    cams.forEach((d, i) => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId; opt.textContent = d.label || `Cámara ${i+1}`; cameraSelect.appendChild(opt);
+    });
+  }
+
+  async function startStream(deviceId) {
+    try {
+      if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+      const constraints = { video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      currentStream = stream;
+      video.srcObject = stream;
+      await video.play();
+      errBox.style.display = 'none';
+    } catch (e) {
+      errBox.textContent = `No se pudo acceder a la cámara: ${e.name}. Revisa permisos del navegador/sistema y que ninguna app (Zoom/Meet) esté usándola.`;
+      errBox.style.display = 'block';
+      throw e;
+    }
+  }
+
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
-    video.srcObject = stream;
-    await video.play();
+    // Primer intento sin deviceId para disparar el permiso
+    await startStream();
+    // Listar cámaras luego del permiso (Chrome revela labels tras permitir)
+    await listCameras();
+    cameraSelect.addEventListener('change', () => startStream(cameraSelect.value));
   } catch (e) {
-    alert('No se pudo acceder a la cámara: ' + e.message);
-    return;
+    // Si el usuario negó, muestra guía rápida
+    if (e.name === 'NotAllowedError') {
+      errBox.innerHTML = 'Permiso de cámara denegado. Haz clic en el ícono de cámara en la barra del navegador → "Permitir". En macOS: Ajustes del sistema → Privacidad y seguridad → Cámara → habilita Chrome.';
+      errBox.style.display = 'block';
+    }
   }
 
   // MediaPipe Face Landmarker
@@ -154,6 +197,12 @@
   let lastVideoTime = -1;
   async function loop() {
     requestAnimationFrame(loop);
+
+  // Si el sitio no está en HTTPS, advertir (getUserMedia requiere contexto seguro)
+  if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+    errBox.textContent = 'Advertencia: esta página no está en HTTPS. La cámara solo funciona en contextos seguros (HTTPS).';
+    errBox.style.display = 'block';
+  }
     if (video.readyState < 2) return;
     if (lastVideoTime === video.currentTime) return;
     lastVideoTime = video.currentTime;
